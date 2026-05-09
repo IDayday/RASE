@@ -92,3 +92,48 @@ Continue RASE if at least two tasks show:
 4. RASE score improves risk-coverage over raw high-Q selection.
 
 If this does not happen, move the project toward subgoal/trajectory false-positive stitching rather than action-level RASE.
+
+## D4RL cache troubleshooting
+
+D4RL imports optional domains at import time. Warnings such as `Flow failed to import`,
+`FrankaKitchen failed to import`, or `CARLA failed to import` are non-fatal for the
+Phase-0 D4RL MuJoCo / AntMaze experiments. They are suppressed by default with:
+
+```bash
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+```
+
+The fatal error below means the cached HDF5 dataset is corrupted or partially downloaded:
+
+```text
+OSError: Unable to synchronously open file (truncated file: eof = ..., stored_eof = ...)
+```
+
+This usually happens when several parallel runs download the same D4RL dataset on first
+use. Fix it with:
+
+```bash
+conda activate rase
+bash scripts/repair_d4rl_cache.sh
+bash scripts/prefetch_d4rl.sh halfcheetah-medium-replay-v2 hopper-medium-replay-v2 walker2d-medium-replay-v2 antmaze-umaze-v2
+```
+
+Then run the sweep again:
+
+```bash
+bash scripts/run_sweep_3090.sh bc
+```
+
+If you use a custom cache directory, set it before starting the container and before
+running prefetch:
+
+```bash
+export DATA_DIR=/data/d4rl_cache
+bash docker/run_container.sh
+```
+
+For an existing non-Docker conda environment, install the compatibility packages:
+
+```bash
+pip install 'setuptools==65.5.0' 'wheel==0.41.3' 'h5py==3.10.0'
+```

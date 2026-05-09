@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Independent jobs are better than DDP for this offline-RL pre-experiment.
 # Edit GPU_IDS to match visible devices in `nvidia-smi`.
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export MUJOCO_GL=${MUJOCO_GL:-osmesa}
+export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-osmesa}
+
 GPU_IDS=(0 1 2 3)
 ENVS=(
   halfcheetah-medium-replay-v2
@@ -12,6 +16,14 @@ ENVS=(
 )
 SEEDS=(0 1 2)
 SOURCE=${1:-bc}
+
+mkdir -p logs
+
+# Very important: D4RL first-run downloads must be serialized. If several jobs
+# download the same .hdf5 simultaneously, h5py may later report "truncated file".
+if [[ "${RASE_SKIP_PREFETCH:-0}" != "1" ]]; then
+  bash scripts/prefetch_d4rl.sh "${ENVS[@]}"
+fi
 
 job_id=0
 for env in "${ENVS[@]}"; do

@@ -3,6 +3,7 @@ FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV MUJOCO_GL=osmesa
 ENV PYOPENGL_PLATFORM=osmesa
+ENV D4RL_SUPPRESS_IMPORT_ERROR=1
 ENV CONDA_DIR=/opt/conda
 ENV PATH=${CONDA_DIR}/bin:${PATH}
 

@@ -14,6 +14,7 @@ docker run --rm -it \
   --ulimit stack=67108864 \
   -e MUJOCO_GL=osmesa \
   -e PYOPENGL_PLATFORM=osmesa \
+  -e D4RL_SUPPRESS_IMPORT_ERROR=1 \
   -v "${PROJECT_DIR}":/workspace/rase_phase0 \
   -v "${DATA_DIR}":/root/.d4rl \
   -w /workspace/rase_phase0 \
