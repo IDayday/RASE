@@ -1,0 +1,45 @@
+# RASE Phase-0: False-positive policy improvement diagnostic on D4RL.
+# Full run: use 200k-500k IQL/FQE steps. Smoke test: override steps to 1000-5000.
+env_name: halfcheetah-medium-replay-v2
+seed: 0
+device: cuda:0
+out_dir: outputs/rase_phase0
+normalize_obs: true
+force_retrain: false
+
+batch_size: 256
+eval_batch_size: 512
+log_every: 1000
+
+iql_steps: 200000
+bc_steps: 100000
+fqe_steps: 200000
+
+# Candidate-pool-size sweep from the RASE document.
+candidate_ms: [1, 4, 16, 64, 256]
+n_eval_states: 4096
+candidate_source: bc  # bc | iql | random | perturb
+perturb_std: 0.1
+
+# RASE-v1 toy conservative score: Z = predicted_advantage - lambda * behavior_NLL.
+rase_lambda_support: 0.05
+thresholds: [-5, -2, -1, -0.5, 0, 0.5, 1, 2, 5]
+
+iql:
+  gamma: 0.99
+  tau: 0.005
+  expectile: 0.7
+  beta: 3.0
+  exp_adv_max: 100.0
+  lr: 0.0003
+  hidden_dim: 256
+
+bc:
+  lr: 0.0003
+  hidden_dim: 256
+
+fqe:
+  gamma: 0.99
+  tau: 0.005
+  lr: 0.0003
+  hidden_dim: 256
