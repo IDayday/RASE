@@ -9,7 +9,8 @@ ENV PATH=${CONDA_DIR}/bin:${PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget git ca-certificates build-essential curl unzip libgl1-mesa-dev \
-    libgl1-mesa-glx libglew-dev libosmesa6-dev patchelf swig \
+    libgl1-mesa-glx libglew-dev libosmesa6-dev libglfw3 libglfw3-dev \
+    libxrender1 libxext6 patchelf swig \
     && rm -rf /var/lib/apt/lists/*
 
 # Miniconda.

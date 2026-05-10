@@ -60,9 +60,14 @@ class D4RLReplayBuffer:
         return self.batch_by_indices(idx)
 
     def sample_indices(self, n: int) -> np.ndarray:
+        # Evaluation states should be unique when possible. Sampling with
+        # replacement adds avoidable Monte Carlo noise to the M sweep.
+        if n <= self.size:
+            return np.random.choice(self.size, size=n, replace=False)
         return np.random.randint(0, self.size, size=n)
 
     def batch_by_indices(self, idx: np.ndarray) -> Dict[str, np.ndarray]:
+        idx = np.asarray(idx, dtype=np.int64)
         return {
             "observations": self.observations[idx],
             "actions": self.actions[idx],
@@ -72,6 +77,63 @@ class D4RLReplayBuffer:
             "timeouts": self.timeouts[idx],
             "indices": idx.astype(np.int64),
         }
+
+    def raw_batch_by_indices(self, idx: np.ndarray) -> Dict[str, np.ndarray]:
+        """Return unnormalized observations for simulator diagnostics."""
+        idx = np.asarray(idx, dtype=np.int64)
+        return {
+            "raw_observations": self.raw_observations[idx],
+            "raw_next_observations": self.raw_next_observations[idx],
+            "actions": self.actions[idx],
+            "rewards": self.rewards[idx],
+            "terminals": self.terminals[idx],
+            "timeouts": self.timeouts[idx],
+            "indices": idx.astype(np.int64),
+        }
+
+    def view(self, indices: np.ndarray) -> "D4RLReplayView":
+        """Lightweight view used for cross-fitted critics without copying data."""
+        return D4RLReplayView(self, indices)
+
+
+class D4RLReplayView:
+    """Index view over a D4RLReplayBuffer.
+
+    The view preserves the parent buffer's observation normalizer. This is
+    important for cross-fitting: all folds should be evaluated on the same
+    feature scale even if each fold trains on a disjoint subset.
+    """
+
+    def __init__(self, parent: D4RLReplayBuffer, indices: np.ndarray):
+        self.parent = parent
+        self.indices = np.asarray(indices, dtype=np.int64)
+        self.size = len(self.indices)
+        self.obs_dim = parent.obs_dim
+        self.act_dim = parent.act_dim
+        self.obs_normalizer = parent.obs_normalizer
+
+    def sample(self, batch_size: int) -> Dict[str, np.ndarray]:
+        local = np.random.randint(0, self.size, size=batch_size)
+        return self.batch_by_indices(local)
+
+    def sample_indices(self, n: int) -> np.ndarray:
+        if n <= self.size:
+            return np.random.choice(self.size, size=n, replace=False)
+        return np.random.randint(0, self.size, size=n)
+
+    def batch_by_indices(self, idx: np.ndarray) -> Dict[str, np.ndarray]:
+        idx = np.asarray(idx, dtype=np.int64)
+        parent_idx = self.indices[idx]
+        out = self.parent.batch_by_indices(parent_idx)
+        out["view_indices"] = idx.astype(np.int64)
+        return out
+
+    def raw_batch_by_indices(self, idx: np.ndarray) -> Dict[str, np.ndarray]:
+        idx = np.asarray(idx, dtype=np.int64)
+        parent_idx = self.indices[idx]
+        out = self.parent.raw_batch_by_indices(parent_idx)
+        out["view_indices"] = idx.astype(np.int64)
+        return out
 
 
 def _d4rl_cache_roots() -> Iterable[Path]:
@@ -131,12 +193,16 @@ def load_d4rl(env_name: str, normalize_obs: bool = True) -> Tuple[object, D4RLRe
         dataset = d4rl.qlearning_dataset(env)
     except OSError as exc:
         msg = str(exc).lower()
-        if "truncated file" in msg or "unable to" in msg and "open file" in msg:
+        if "truncated file" in msg or ("unable to" in msg and "open file" in msg):
             print(
                 "[D4RL] HDF5 open failed. This almost always means the cached D4RL "
                 "dataset is partially downloaded/corrupted, often because multiple "
                 "parallel jobs tried to download the same file."
             )
+            try:
+                env.close()
+            except Exception:
+                pass
             _remove_probably_corrupt_d4rl_files(env_name)
             print("[D4RL] Retrying dataset download/load once...")
             env = gym.make(env_name)

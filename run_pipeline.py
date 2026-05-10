@@ -53,7 +53,8 @@ def main() -> None:
     parser.add_argument("--bc_steps", type=int, default=None)
     parser.add_argument("--fqe_steps", type=int, default=None)
     parser.add_argument("--n_eval_states", type=int, default=None)
-    parser.add_argument("--candidate_source", type=str, default=None, choices=[None, "bc", "iql", "random", "perturb"])
+    parser.add_argument("--candidate_source", type=str, default=None, choices=["bc", "iql", "random", "perturb"])
+    parser.add_argument("--force_retrain", action="store_true", help="Ignore cached checkpoints and retrain all modules.")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
@@ -63,6 +64,8 @@ def main() -> None:
             cfg[k] = v
     if args.candidate_source is not None:
         cfg["candidate_source"] = args.candidate_source
+    if args.force_retrain:
+        cfg["force_retrain"] = True
 
     set_seed(int(cfg["seed"]))
     device = get_device(cfg["device"])
@@ -98,7 +101,13 @@ def main() -> None:
     fqe_ckpt = out_dir / "fqe_iql_ref.pt"
     if fqe_ckpt.exists() and not cfg.get("force_retrain", False):
         print(f"Loading FQE checkpoint: {fqe_ckpt}")
-        fqe.load(fqe_ckpt)
+        try:
+            fqe.load(fqe_ckpt)
+        except RuntimeError as exc:
+            print(f"[FQE] {exc}")
+            print("[FQE] Retraining FQE with the current twin-Q evaluator.")
+            train_loop(fqe, replay, int(cfg["fqe_steps"]), int(cfg["batch_size"]), int(cfg["log_every"]), "FQE")
+            fqe.save(fqe_ckpt)
     else:
         train_loop(fqe, replay, int(cfg["fqe_steps"]), int(cfg["batch_size"]), int(cfg["log_every"]), "FQE")
         fqe.save(fqe_ckpt)

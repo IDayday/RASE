@@ -1,8 +1,9 @@
 """RASE Phase-0 diagnostic code.
 
 RASE = Risk-Controlled Advantage Set Extraction.
-This package implements the first pre-experiment: candidate-pool-size
-selection bias and false-positive policy improvement diagnostics.
+This package implements Phase-0/1 diagnostics: candidate-pool-size
+selection bias, rollout/FQE label validation, proxy alignment, and
+cross-fitted critic diagnostics.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

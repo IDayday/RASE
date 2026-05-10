@@ -6,6 +6,7 @@ export MUJOCO_GL=${MUJOCO_GL:-osmesa}
 export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-osmesa}
 
 # Smoke test: verifies install and pipeline logic. Not for reporting.
+bash scripts/run_unit_tests.sh
 python run_pipeline.py \
   --config configs/phase0_d4rl.yaml \
   --env_name halfcheetah-medium-replay-v2 \

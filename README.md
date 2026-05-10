@@ -1,139 +1,186 @@
-# RASE Phase-0 Pre-Experiment
+# RASE Phase-0 to Phase-1 Experiment Code
 
-RASE = **Risk-Controlled Advantage Set Extraction**. This code implements the first diagnostic stage: whether enlarging a candidate action pool increases predicted high-Q selection while creating false-positive policy improvements.
+RASE = **Risk-Controlled Advantage Set Extraction**.
 
-## What this repo tests
+This repository implements the current RASE-only experimental line. It is **not** PCAR and does not contain offline-to-online action replacement. The goal is to study and control false-positive policy improvement induced by high-Q candidate selection in offline RL.
 
-For each dataset state `s`, sample candidate actions from a behavior model, IQL actor, random actions, or local perturbations. For each candidate-pool size `M`, select `argmax_a Q_IQL(s,a)` and compare:
+## Current research question
 
-- predicted advantage from IQL: `Q_IQL(s,a*) - V_IQL(s)`;
-- empirical proxy advantage from FQE: `Q_FQE(s,a*) - Q_FQE(s,a_data)`;
-- false-positive improvement: predicted advantage positive, FQE advantage non-positive;
-- RASE-v1 risk-coverage curve with `Z = predicted_advantage - lambda * behavior_NLL`.
-
-This is a Phase-0 diagnostic, not a final RASE algorithm.
-
-## Recommended pre-experiment environments
-
-Start with D4RL v2 state-based tasks:
+For a dataset state `s`, sample a candidate action pool `A_M(s)` from BC / IQL / random / perturb proposals. Raw selection chooses
 
 ```text
-halfcheetah-medium-replay-v2
-hopper-medium-replay-v2
-walker2d-medium-replay-v2
-antmaze-umaze-v2
+a* = argmax_a Q_IQL(s, a), a in A_M(s)
 ```
 
-Minimum: 4 tasks x 3 seeds. Add `antmaze-medium-play-v2` and `antmaze-medium-diverse-v2` after smoke tests.
+RASE asks whether this high-Q action is actually a reliable improvement over the data action `a_data`, and whether we can extract an accepted action set with controlled false-positive risk.
+
+Main pairwise quantities:
+
+```text
+predicted_gap = Q_IQL(s, a*) - Q_IQL(s, a_data)
+fqe_gap       = Q_FQE(s, a*) - Q_FQE(s, a_data)
+FPI_FQE       = predicted_gap > 0 and fqe_gap <= 0
+```
+
+The old `Q_IQL(s,a*) - V_IQL(s)` statistic is logged as `iql_adv_vs_v_mean` but is not the main false-positive label.
+
+## What changed in v4
+
+v4 keeps the audited Phase-0 sweep and adds the next experimental stages:
+
+1. **Phase-0.5 rollout diagnostic**: short-horizon action replacement rollouts validate whether FQE labels agree with simulator evidence.
+2. **Phase-1 cross-fitted critic diagnostic**: train fold-specific IQL critics and evaluate candidate selection on held-out states.
+3. **Phase-1/2 proxy alignment**: evaluate support NLL, kNN support distance, critic/FQE disagreement, action distance, and composite RASE scores against FQE-positive labels.
+4. **Calibrated risk-coverage**: compare precision at fixed coverage instead of relying on global absolute thresholds.
 
 ## Build Docker image
 
 ```bash
-cd rase_phase0
 docker build -t rase-phase0:cu118 .
-```
-
-## Start Docker container
-
-```bash
-cd rase_phase0
 bash docker/run_container.sh
 conda activate rase
 ```
 
-## Smoke test
+## Data cache sanity
+
+Before multi-GPU runs, prefetch D4RL serially:
+
+```bash
+bash scripts/repair_d4rl_cache.sh
+bash scripts/prefetch_d4rl.sh \
+  halfcheetah-medium-replay-v2 \
+  hopper-medium-replay-v2 \
+  walker2d-medium-replay-v2 \
+  antmaze-umaze-v2
+```
+
+## Phase-0: reproduce candidate-pool sweep
 
 ```bash
 bash scripts/run_smoke.sh
-```
-
-## Full multi-GPU sweep
-
-Inside the container:
-
-```bash
-mkdir -p logs
 bash scripts/run_sweep_3090.sh bc
-bash scripts/run_sweep_3090.sh iql
-bash scripts/run_sweep_3090.sh perturb
+RASE_SKIP_PREFETCH=1 bash scripts/run_sweep_3090.sh iql
+RASE_SKIP_PREFETCH=1 bash scripts/run_sweep_3090.sh perturb
 ```
 
-The script launches independent env/seed jobs across GPUs via `CUDA_VISIBLE_DEVICES`. This is preferable to DDP because each offline RL seed is small and independent.
-
-## Outputs
-
-Each run writes to:
+Outputs:
 
 ```text
-outputs/rase_phase0/<env_name>/seed<seed>/
-  iql.pt
-  bc.pt
-  fqe_iql_ref.pt
+outputs/rase_phase0_v4/<env>/seed<seed>/
   sweep_<source>.csv
   risk_coverage_<source>.csv
   plots/*.png
 ```
 
-Main plots:
+## Phase-0.5: validate FQE with short rollouts
 
-- `pred_adv_mean.png`
-- `fqe_adv_mean.png`
-- `pred_empirical_gap.png`
-- `fpi_rate_cond_pred_positive.png`
-- `risk_coverage_M*.png`
-
-## Go / no-go signal
-
-Continue RASE if at least two tasks show:
-
-1. predicted advantage increases with candidate-pool size `M`;
-2. FQE advantage does not increase at the same rate, or decreases;
-3. conditional false-positive improvement rate increases with `M`;
-4. RASE score improves risk-coverage over raw high-Q selection.
-
-If this does not happen, move the project toward subgoal/trajectory false-positive stitching rather than action-level RASE.
-
-## D4RL cache troubleshooting
-
-D4RL imports optional domains at import time. Warnings such as `Flow failed to import`,
-`FrankaKitchen failed to import`, or `CARLA failed to import` are non-fatal for the
-Phase-0 D4RL MuJoCo / AntMaze experiments. They are suppressed by default with:
+Run on locomotion tasks first. AntMaze state restoration is less reliable for this action-level diagnostic.
 
 ```bash
-export D4RL_SUPPRESS_IMPORT_ERROR=1
+python run_rollout_diagnostic.py \
+  --config configs/phase0_d4rl.yaml \
+  --env_name hopper-medium-replay-v2 \
+  --seed 41 \
+  --device cuda:0 \
+  --candidate_source bc \
+  --n_eval_states 256 \
+  --rollout_horizon 50 \
+  --rollout_repeats 3 \
+  --max_pairs_per_m 128
 ```
 
-The fatal error below means the cached HDF5 dataset is corrupted or partially downloaded:
+Outputs:
 
 ```text
-OSError: Unable to synchronously open file (truncated file: eof = ..., stored_eof = ...)
+diagnostics/rollout_pairs_<source>_<continuation>.csv
+diagnostics/rollout_summary_<source>_<continuation>.csv
 ```
 
-This usually happens when several parallel runs download the same D4RL dataset on first
-use. Fix it with:
+Key checks:
+
+```text
+fqe_rollout_corr
+pred_rollout_corr
+rollout_fpi_rate
+pred_rollout_gap_mean
+```
+
+## Phase-1: cross-fitted critic diagnostic
 
 ```bash
-conda activate rase
-bash scripts/repair_d4rl_cache.sh
-bash scripts/prefetch_d4rl.sh halfcheetah-medium-replay-v2 hopper-medium-replay-v2 walker2d-medium-replay-v2 antmaze-umaze-v2
+python run_crossfit_iql.py \
+  --config configs/phase0_d4rl.yaml \
+  --env_name hopper-medium-replay-v2 \
+  --seed 41 \
+  --device cuda:0 \
+  --candidate_source bc \
+  --num_folds 3 \
+  --fold_iql_steps 100000 \
+  --heldout_eval_states 2048
 ```
 
-Then run the sweep again:
+Outputs:
+
+```text
+crossfit/crossfit_sweep_<source>.csv
+crossfit/fold*/iql_fold.pt
+```
+
+This tests whether the selection-induced predicted/FQE gap persists when the selecting critic is trained out-of-fold.
+
+## Phase-1/2: proxy alignment and calibrated risk-coverage
 
 ```bash
-bash scripts/run_sweep_3090.sh bc
+python run_proxy_alignment.py \
+  --config configs/phase0_d4rl.yaml \
+  --env_name hopper-medium-replay-v2 \
+  --seed 41 \
+  --device cuda:0 \
+  --candidate_source bc \
+  --n_eval_states 4096 \
+  --knn_ref_size 20000
 ```
 
-If you use a custom cache directory, set it before starting the container and before
-running prefetch:
+Outputs:
+
+```text
+diagnostics/proxy_details_<source>.csv
+diagnostics/proxy_alignment_<source>.csv
+diagnostics/calibrated_risk_coverage_<source>.csv
+```
+
+Main metrics:
+
+```text
+AUROC/AUPRC for FQE-positive improvement
+precision_at_cov_0.2 / 0.3 / 0.5 / 0.7
+calibrated risk-coverage rows for pred_pair_gap, rase_score, rase_score_v2
+```
+
+## Recommended next run order
+
+Start with locomotion replay tasks where Phase-0 gave strong evidence:
+
+```text
+hopper-medium-replay-v2
+walker2d-medium-replay-v2
+halfcheetah-medium-replay-v2
+```
+
+Then run:
 
 ```bash
-export DATA_DIR=/data/d4rl_cache
-bash docker/run_container.sh
+bash scripts/run_phase05_rollout.sh bc
+bash scripts/run_phase1_proxy.sh bc
+bash scripts/run_phase1_crossfit.sh bc
 ```
 
-For an existing non-Docker conda environment, install the compatibility packages:
+Repeat with `iql` source after BC is verified.
+
+## Unit tests
 
 ```bash
-pip install 'setuptools==65.5.0' 'wheel==0.41.3' 'h5py==3.10.0'
+bash scripts/run_unit_tests.sh
 ```
+
+The unit tests do not require D4RL.

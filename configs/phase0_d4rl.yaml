@@ -1,9 +1,11 @@
-# RASE Phase-0: False-positive policy improvement diagnostic on D4RL.
-# Full run: use 200k-500k IQL/FQE steps. Smoke test: override steps to 1000-5000.
+# RASE Phase-0/1 diagnostics on D4RL.
+# Phase-0: candidate-pool selection optimism and FQE false-positive proxy.
+# Phase-0.5: short-rollout validation of the FQE proxy.
+# Phase-1: cross-fitted critics and proxy-alignment diagnostics.
 env_name: halfcheetah-medium-replay-v2
 seed: 0
 device: cuda:0
-out_dir: outputs/rase_phase0
+out_dir: outputs/rase_phase0_v4
 normalize_obs: true
 force_retrain: false
 
@@ -15,13 +17,12 @@ iql_steps: 200000
 bc_steps: 100000
 fqe_steps: 200000
 
-# Candidate-pool-size sweep from the RASE document.
 candidate_ms: [1, 4, 16, 64, 256]
 n_eval_states: 4096
 candidate_source: bc  # bc | iql | random | perturb
 perturb_std: 0.1
 
-# RASE-v1 toy conservative score: Z = predicted_advantage - lambda * behavior_NLL.
+# RASE-v1 toy conservative score: Z = pairwise_predicted_gap - lambda * behavior_NLL.
 rase_lambda_support: 0.05
 thresholds: [-5, -2, -1, -0.5, 0, 0.5, 1, 2, 5]
 
@@ -43,3 +44,37 @@ fqe:
   tau: 0.005
   lr: 0.0003
   hidden_dim: 256
+
+# Phase-0.5: simulator label validation. Keep small by default.
+rollout_diagnostic:
+  candidate_ms: [1, 16, 64, 256]
+  n_eval_states: 256
+  batch_size: 256
+  rollout_horizon: 50
+  rollout_repeats: 3
+  gamma: 0.99
+  max_pairs_per_m: 128
+  only_pred_positive: true
+  continuation_policy: iql       # iql | bc
+  deterministic_continuation: true
+
+# Phase-1: out-of-fold critic diagnostic.
+crossfit:
+  num_folds: 3
+  fold_iql_steps: 100000
+  fold_fqe_steps: 100000
+  train_fqe: false
+  heldout_eval_states: 2048
+  candidate_ms: [1, 4, 16, 64, 256]
+
+# Phase-1/2: proxy alignment and calibrated risk-coverage.
+proxy:
+  knn_ref_size: 20000
+  knn_batch_size: 512
+  obs_scale: 1.0
+  action_scale: 1.0
+  coverages: [0.2, 0.3, 0.5, 0.7]
+  composite_lambda_support: 0.05
+  composite_lambda_iql_dis: 0.10
+  composite_lambda_fqe_dis: 0.10
+  composite_lambda_knn: 0.10
