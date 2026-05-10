@@ -65,20 +65,28 @@ def atanh_clamped(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 
 class GaussianPolicy(nn.Module):
-    """Tanh-squashed diagonal Gaussian policy.
+    """Diagonal Gaussian policy with configurable action squashing.
 
-    Earlier drafts used raw Gaussian samples followed by hard clipping. That is fast,
-    but it makes the behavior log-probability and support-NLL diagnostic inconsistent:
-    a clipped sample is not distributed as the unclipped Normal whose log_prob is used.
-    This implementation uses the standard tanh transform and exact change-of-variables
-    correction, which is still cheap and gives better support diagnostics.
+    `squash_mode="tanh"` is the audited v3/v4+ behavior: samples are transformed
+    with tanh and log_prob uses the exact change-of-variables correction.
+
+    `squash_mode="clip"` reproduces the legacy Phase-0 behavior used by the first
+    code releases: raw Gaussian samples are hard-clipped and log_prob is computed
+    in the raw action space. This mode is intentionally retained only so existing
+    checkpoints under `outputs/rase_phase0/` can be diagnosed without changing the
+    behavior of the saved IQL/BC policies.
     """
 
-    def __init__(self, obs_dim: int, act_dim: int, hidden_dims=(256, 256), log_std_bounds=(-5.0, 2.0)):
+    VALID_SQUASH_MODES = {"tanh", "clip"}
+
+    def __init__(self, obs_dim: int, act_dim: int, hidden_dims=(256, 256), log_std_bounds=(-5.0, 2.0), squash_mode: str = "tanh"):
         super().__init__()
+        if squash_mode not in self.VALID_SQUASH_MODES:
+            raise ValueError(f"Unknown squash_mode={squash_mode!r}; expected one of {sorted(self.VALID_SQUASH_MODES)}")
         self.backbone = MLP(obs_dim, act_dim * 2, hidden_dims)
         self.log_std_bounds = log_std_bounds
         self.act_dim = act_dim
+        self.squash_mode = str(squash_mode)
 
     def mean_logstd(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         out = self.backbone(obs)
@@ -95,20 +103,24 @@ class GaussianPolicy(nn.Module):
     def sample(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         dist = self.distribution(obs)
         raw = dist.mean if deterministic else dist.rsample()
+        if self.squash_mode == "clip":
+            return torch.clamp(raw, -1.0, 1.0)
         return torch.tanh(raw)
 
     def sample_n(self, obs: torch.Tensor, n: int, deterministic: bool = False) -> torch.Tensor:
         """Return [B, n, act_dim] actions without building Python loops."""
         b = obs.shape[0]
-        obs_rep = obs[:, None, :].expand(b, n, obs.shape[-1]).reshape(b * n, obs.shape[-1])
+        obs_rep = obs[:, None, :].expand(b, int(n), obs.shape[-1]).reshape(b * int(n), obs.shape[-1])
         actions = self.sample(obs_rep, deterministic=deterministic)
-        return actions.reshape(b, n, self.act_dim)
+        return actions.reshape(b, int(n), self.act_dim)
 
     def log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         dist = self.distribution(obs)
+        if self.squash_mode == "clip":
+            # Legacy approximation used by the original Phase-0 checkpoints.
+            return dist.log_prob(actions).sum(dim=-1, keepdim=True)
         raw = atanh_clamped(actions)
         logp_raw = dist.log_prob(raw).sum(dim=-1, keepdim=True)
-        # Change-of-variables correction for tanh(raw).
         correction = torch.log(torch.clamp(1.0 - actions.pow(2), min=1e-6)).sum(dim=-1, keepdim=True)
         return logp_raw - correction
 

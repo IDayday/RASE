@@ -4,6 +4,37 @@ RASE = **Risk-Controlled Advantage Set Extraction**.
 
 This repository implements the current RASE-only experimental line. It is **not** PCAR and does not contain offline-to-online action replacement. The goal is to study and control false-positive policy improvement induced by high-Q candidate selection in offline RL.
 
+
+## v5 checkpoint-compatibility fix
+
+This release fixes the common error:
+
+```text
+RuntimeError: FQE checkpoint is from an older incompatible version.
+```
+
+Cause: early Phase-0 outputs under `outputs/rase_phase0/` used a legacy single-Q FQE checkpoint and a clipped Gaussian policy. The current audited diagnostics require TwinQ/min-Q FQE. v5 now:
+
+1. detects legacy `outputs/rase_phase0/.../fqe_iql_ref.pt`;
+2. preserves legacy policy semantics with `--policy_squash auto` by selecting `clip`;
+3. backs up the old FQE checkpoint;
+4. retrains a compatible TwinQ/min-Q FQE checkpoint automatically unless `--no_auto_retrain_fqe` is passed.
+
+To diagnose your existing Phase-0 outputs without rerunning IQL/BC:
+
+```bash
+python run_rollout_diagnostic.py \
+  --config configs/phase0_d4rl.yaml \
+  --out_dir outputs/rase_phase0 \
+  --env_name walker2d-medium-replay-v2 \
+  --seed 41 \
+  --device cuda:0 \
+  --candidate_source bc \
+  --policy_squash auto
+```
+
+For a fresh audited rerun, use the default output directory `outputs/rase_phase0_v5` and keep `policy_squash: tanh`.
+
 ## Current research question
 
 For a dataset state `s`, sample a candidate action pool `A_M(s)` from BC / IQL / random / perturb proposals. Raw selection chooses

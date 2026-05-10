@@ -21,6 +21,7 @@ class IQLConfig:
     exp_adv_max: float = 100.0
     lr: float = 3e-4
     hidden_dim: int = 256
+    policy_squash: str = "tanh"
 
 
 class IQLAgent:
@@ -28,7 +29,7 @@ class IQLAgent:
         self.cfg = cfg
         self.device = device
         hidden = (cfg.hidden_dim, cfg.hidden_dim)
-        self.actor = GaussianPolicy(obs_dim, act_dim, hidden).to(device)
+        self.actor = GaussianPolicy(obs_dim, act_dim, hidden, squash_mode=cfg.policy_squash).to(device)
         self.q = TwinQ(obs_dim, act_dim, hidden).to(device)
         self.q_target = TwinQ(obs_dim, act_dim, hidden).to(device)
         self.v = ValueNet(obs_dim, hidden).to(device)
@@ -101,10 +102,19 @@ class IQLAgent:
             "q_target": self.q_target.state_dict(),
             "v": self.v.state_dict(),
             "cfg": self.cfg.__dict__,
+            "version": 2,
+            "policy_squash": self.cfg.policy_squash,
         }, path)
 
     def load(self, path: str | Path) -> None:
         ckpt = torch.load(path, map_location=self.device)
+        ckpt_squash = ckpt.get("policy_squash")
+        if ckpt_squash is not None and ckpt_squash != self.cfg.policy_squash:
+            raise RuntimeError(
+                f"IQL checkpoint policy_squash={ckpt_squash!r} does not match requested "
+                f"policy_squash={self.cfg.policy_squash!r}. Use --policy_squash {ckpt_squash} "
+                "or retrain with --force_retrain."
+            )
         self.actor.load_state_dict(ckpt["actor"])
         self.q.load_state_dict(ckpt["q"])
         self.q_target.load_state_dict(ckpt.get("q_target", ckpt["q"]))

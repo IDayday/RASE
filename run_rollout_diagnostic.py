@@ -6,19 +6,28 @@ from pathlib import Path
 from rase.bc import BCAgent, BCConfig
 from rase.fqe import FQEAgent, FQEConfig
 from rase.iql import IQLAgent, IQLConfig
-from rase.io_utils import write_csv, require_checkpoint
+from rase.io_utils import apply_policy_squash, ensure_fqe_checkpoint, write_csv, require_checkpoint, resolve_policy_squash
 from rase.replay import load_d4rl
 from rase.rollout import RolloutDiagnosticConfig, run_action_replacement_rollout_diagnostic
 from rase.utils import get_device, load_yaml, save_json, set_seed
 
 
-def load_agents(cfg, obs_dim, act_dim, device, run_dir: Path):
-    iql = IQLAgent(obs_dim, act_dim, IQLConfig(**cfg["iql"]), device)
-    bc = BCAgent(obs_dim, act_dim, BCConfig(**cfg["bc"]), device)
+def load_agents(cfg, replay, device, run_dir: Path, force_retrain_fqe: bool, auto_retrain_fqe: bool):
+    iql = IQLAgent(replay.obs_dim, replay.act_dim, IQLConfig(**cfg["iql"]), device)
+    bc = BCAgent(replay.obs_dim, replay.act_dim, BCConfig(**cfg["bc"]), device)
     iql.load(require_checkpoint(run_dir / "iql.pt"))
     bc.load(require_checkpoint(run_dir / "bc.pt"))
-    fqe = FQEAgent(obs_dim, act_dim, FQEConfig(**cfg["fqe"]), ref_policy=iql.actor, device=device)
-    fqe.load(require_checkpoint(run_dir / "fqe_iql_ref.pt"))
+    fqe = FQEAgent(replay.obs_dim, replay.act_dim, FQEConfig(**cfg["fqe"]), ref_policy=iql.actor, device=device)
+    ensure_fqe_checkpoint(
+        fqe,
+        replay,
+        run_dir / "fqe_iql_ref.pt",
+        steps=int(cfg["fqe_steps"]),
+        batch_size=int(cfg["batch_size"]),
+        log_every=int(cfg["log_every"]),
+        force_retrain=force_retrain_fqe,
+        auto_retrain_incompatible=auto_retrain_fqe,
+    )
     return iql, bc, fqe
 
 
@@ -31,15 +40,19 @@ def main() -> None:
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--candidate_source", type=str, default=None, choices=["bc", "iql", "random", "perturb"])
     parser.add_argument("--n_eval_states", type=int, default=None)
+    parser.add_argument("--fqe_steps", type=int, default=None)
     parser.add_argument("--rollout_horizon", type=int, default=None)
     parser.add_argument("--rollout_repeats", type=int, default=None)
     parser.add_argument("--max_pairs_per_m", type=int, default=None)
     parser.add_argument("--continuation_policy", type=str, default=None, choices=["iql", "bc"])
+    parser.add_argument("--policy_squash", type=str, default="auto", choices=["auto", "tanh", "clip"])
+    parser.add_argument("--force_retrain_fqe", action="store_true", help="Retrain the audited TwinQ FQE evaluator before rollout diagnostics.")
+    parser.add_argument("--no_auto_retrain_fqe", action="store_true", help="Do not auto-retrain if the cached FQE checkpoint is incompatible.")
     parser.add_argument("--all_pairs", action="store_true", help="Do not restrict diagnostic pairs to pred-positive selections.")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
-    for k in ["env_name", "seed", "device", "out_dir", "n_eval_states"]:
+    for k in ["env_name", "seed", "device", "out_dir", "n_eval_states", "fqe_steps"]:
         v = getattr(args, k)
         if v is not None:
             cfg[k] = v
@@ -49,6 +62,10 @@ def main() -> None:
     device = get_device(cfg["device"])
 
     run_dir = Path(cfg["out_dir"]) / cfg["env_name"] / f"seed{cfg['seed']}"
+    policy_squash = resolve_policy_squash(cfg, run_dir, requested=args.policy_squash, ignore_existing=False)
+    cfg = apply_policy_squash(cfg, policy_squash)
+    print(f"[policy] policy_squash={policy_squash}")
+
     diag_dir = run_dir / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
 
@@ -57,6 +74,7 @@ def main() -> None:
     rollout_cfg_raw.setdefault("n_eval_states", min(int(cfg.get("n_eval_states", 4096)), 256))
     rollout_cfg_raw.setdefault("batch_size", int(cfg.get("eval_batch_size", 512)))
     rollout_cfg_raw.setdefault("source", cfg["candidate_source"])
+    rollout_cfg_raw["source"] = cfg["candidate_source"]
     rollout_cfg_raw.setdefault("perturb_std", float(cfg.get("perturb_std", 0.1)))
     rollout_cfg_raw.setdefault("rase_lambda_support", float(cfg.get("rase_lambda_support", 0.05)))
     if args.rollout_horizon is not None:
@@ -69,7 +87,6 @@ def main() -> None:
         rollout_cfg_raw["continuation_policy"] = args.continuation_policy
     if args.all_pairs:
         rollout_cfg_raw["only_pred_positive"] = False
-    # command-line n_eval_states should also update rollout config
     if args.n_eval_states is not None:
         rollout_cfg_raw["n_eval_states"] = args.n_eval_states
     rollout_cfg = RolloutDiagnosticConfig(**rollout_cfg_raw)
@@ -80,7 +97,14 @@ def main() -> None:
 
     print(f"Loading D4RL environment: {cfg['env_name']}")
     env, replay = load_d4rl(cfg["env_name"], normalize_obs=bool(cfg.get("normalize_obs", True)))
-    iql, bc, fqe = load_agents(cfg, replay.obs_dim, replay.act_dim, device, run_dir)
+    iql, bc, fqe = load_agents(
+        cfg,
+        replay,
+        device,
+        run_dir,
+        force_retrain_fqe=bool(args.force_retrain_fqe),
+        auto_retrain_fqe=not bool(args.no_auto_retrain_fqe),
+    )
 
     out = run_action_replacement_rollout_diagnostic(env, replay, iql, bc, fqe, rollout_cfg, device, seed=int(cfg["seed"]))
     prefix = f"{cfg['candidate_source']}_{rollout_cfg.continuation_policy}"

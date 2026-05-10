@@ -8,7 +8,7 @@ from rase.candidate import SweepConfig, run_candidate_sweep
 from rase.crossfit import CrossFitConfig, make_kfold_indices
 from rase.fqe import FQEAgent, FQEConfig
 from rase.iql import IQLAgent, IQLConfig
-from rase.io_utils import train_loop, write_csv, require_checkpoint
+from rase.io_utils import apply_policy_squash, ensure_fqe_checkpoint, train_loop, write_csv, require_checkpoint, resolve_policy_squash
 from rase.replay import load_d4rl
 from rase.utils import get_device, load_yaml, save_json, set_seed
 
@@ -24,11 +24,15 @@ def main() -> None:
     parser.add_argument("--num_folds", type=int, default=None)
     parser.add_argument("--fold_iql_steps", type=int, default=None)
     parser.add_argument("--heldout_eval_states", type=int, default=None)
+    parser.add_argument("--fqe_steps", type=int, default=None)
+    parser.add_argument("--policy_squash", type=str, default="auto", choices=["auto", "tanh", "clip"])
+    parser.add_argument("--force_retrain_fqe", action="store_true")
+    parser.add_argument("--no_auto_retrain_fqe", action="store_true")
     parser.add_argument("--force_retrain_folds", action="store_true")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
-    for k in ["env_name", "seed", "device", "out_dir"]:
+    for k in ["env_name", "seed", "device", "out_dir", "fqe_steps"]:
         v = getattr(args, k)
         if v is not None:
             cfg[k] = v
@@ -36,6 +40,11 @@ def main() -> None:
         cfg["candidate_source"] = args.candidate_source
     set_seed(int(cfg["seed"]))
     device = get_device(cfg["device"])
+
+    run_dir = Path(cfg["out_dir"]) / cfg["env_name"] / f"seed{cfg['seed']}"
+    policy_squash = resolve_policy_squash(cfg, run_dir, requested=args.policy_squash, ignore_existing=False)
+    cfg = apply_policy_squash(cfg, policy_squash)
+    print(f"[policy] policy_squash={policy_squash}")
 
     cf_raw = dict(cfg.get("crossfit", {}) or {})
     if args.num_folds is not None:
@@ -47,7 +56,6 @@ def main() -> None:
     cf_raw.setdefault("candidate_ms", cfg["candidate_ms"])
     cross_cfg = CrossFitConfig(**cf_raw)
 
-    run_dir = Path(cfg["out_dir"]) / cfg["env_name"] / f"seed{cfg['seed']}"
     diag_dir = run_dir / "crossfit"
     diag_dir.mkdir(parents=True, exist_ok=True)
     cfg_to_save = dict(cfg)
@@ -57,15 +65,21 @@ def main() -> None:
     print(f"Loading D4RL environment: {cfg['env_name']}")
     env, replay = load_d4rl(cfg["env_name"], normalize_obs=bool(cfg.get("normalize_obs", True)))
 
-    # Use the full BC/FQE evaluator as proposal/evaluation modules; the selected
-    # critic is trained out-of-fold. This isolates critic selection bias without
-    # multiplying compute by also cross-fitting every auxiliary module.
     full_iql = IQLAgent(replay.obs_dim, replay.act_dim, IQLConfig(**cfg["iql"]), device)
     full_iql.load(require_checkpoint(run_dir / "iql.pt"))
     bc = BCAgent(replay.obs_dim, replay.act_dim, BCConfig(**cfg["bc"]), device)
     bc.load(require_checkpoint(run_dir / "bc.pt"))
     fqe = FQEAgent(replay.obs_dim, replay.act_dim, FQEConfig(**cfg["fqe"]), ref_policy=full_iql.actor, device=device)
-    fqe.load(require_checkpoint(run_dir / "fqe_iql_ref.pt"))
+    ensure_fqe_checkpoint(
+        fqe,
+        replay,
+        run_dir / "fqe_iql_ref.pt",
+        steps=int(cfg["fqe_steps"]),
+        batch_size=int(cfg["batch_size"]),
+        log_every=int(cfg["log_every"]),
+        force_retrain=bool(args.force_retrain_fqe),
+        auto_retrain_incompatible=not bool(args.no_auto_retrain_fqe),
+    )
 
     folds = make_kfold_indices(replay.size, int(cross_cfg.num_folds), int(cfg["seed"]))
     all_rows = []
@@ -84,12 +98,9 @@ def main() -> None:
             fold_iql.save(ckpt)
 
         if len(valid_idx) > int(cross_cfg.heldout_eval_states):
-            # Deterministic subset per fold for comparability.
             valid_eval = valid_idx[: int(cross_cfg.heldout_eval_states)]
         else:
             valid_eval = valid_idx
-        # Candidate source iql should still use the fold actor, because the proposal
-        # itself is part of the tested out-of-fold policy. BC source remains full BC.
         proposal_iql = fold_iql if cfg["candidate_source"] == "iql" else full_iql
         sweep_cfg = SweepConfig(
             candidate_ms=cross_cfg.candidate_ms,
@@ -100,9 +111,9 @@ def main() -> None:
             rase_lambda_support=float(cfg["rase_lambda_support"]),
             thresholds=cfg["thresholds"],
         )
-        # Run on a view whose local indices cover the held-out parent indices.
         valid_view = replay.view(valid_eval)
-        out = run_candidate_sweep(valid_view, fold_iql if cfg["candidate_source"] != "iql" else proposal_iql, bc, fqe, sweep_cfg, device)
+        selector_iql = proposal_iql if cfg["candidate_source"] == "iql" else fold_iql
+        out = run_candidate_sweep(valid_view, selector_iql, bc, fqe, sweep_cfg, device)
         for row in out["sweep"]:
             row["fold"] = fold_id
             row["n_train"] = int(len(train_idx))

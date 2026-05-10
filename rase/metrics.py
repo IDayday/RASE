@@ -86,7 +86,10 @@ def threshold_at_coverage(scores, coverage: float) -> float:
         return float("inf")
     if coverage >= 1:
         return float(np.min(s))
-    return float(np.quantile(s, 1.0 - coverage, method="nearest"))
+    try:
+        return float(np.quantile(s, 1.0 - coverage, method="nearest"))
+    except TypeError:  # NumPy < 1.22 compatibility
+        return float(np.quantile(s, 1.0 - coverage, interpolation="nearest"))
 
 
 def precision_at_coverage(labels, scores, coverage: float) -> float:

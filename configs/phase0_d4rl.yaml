@@ -5,9 +5,11 @@
 env_name: halfcheetah-medium-replay-v2
 seed: 0
 device: cuda:0
-out_dir: outputs/rase_phase0_v4
+out_dir: outputs/rase_phase0_v5
 normalize_obs: true
 force_retrain: false
+# tanh is the audited default. Use --policy_squash auto to preserve legacy clip checkpoints.
+policy_squash: tanh
 
 batch_size: 256
 eval_batch_size: 512

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Union
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ from .iql import IQLAgent
 from .replay import D4RLReplayBuffer, D4RLReplayView
 from .utils import torchify
 
-ReplayLike = D4RLReplayBuffer | D4RLReplayView
+ReplayLike = Union[D4RLReplayBuffer, D4RLReplayView]
 
 
 @dataclass

@@ -12,6 +12,10 @@ from .networks import GaussianPolicy, TwinQ
 from .utils import hard_update, soft_update, torchify
 
 
+class IncompatibleFQECheckpointError(RuntimeError):
+    """Raised when an existing FQE checkpoint uses an incompatible evaluator."""
+
+
 @dataclass
 class FQEConfig:
     gamma: float = 0.99
@@ -43,6 +47,10 @@ class FQEAgent:
         self.q_target = TwinQ(obs_dim, act_dim, hidden).to(device)
         hard_update(self.q_target, self.q)
         self.opt = Adam(self.q.parameters(), lr=cfg.lr)
+
+    @property
+    def ref_policy_squash(self) -> str:
+        return str(getattr(self.ref_policy, "squash_mode", "unknown"))
 
     def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         obs = batch["observations"]
@@ -89,14 +97,21 @@ class FQEAgent:
             "q": self.q.state_dict(),
             "q_target": self.q_target.state_dict(),
             "cfg": self.cfg.__dict__,
+            "ref_policy_squash": self.ref_policy_squash,
         }, path)
 
     def load(self, path: str | Path) -> None:
         ckpt = torch.load(path, map_location=self.device)
         if ckpt.get("version", 1) != self.CHECKPOINT_VERSION:
-            raise RuntimeError(
-                "FQE checkpoint is from an older incompatible version. "
-                "Use --force_retrain or delete fqe_iql_ref.pt."
+            raise IncompatibleFQECheckpointError(
+                "FQE checkpoint is from an older single-Q evaluator. The current diagnostics require "
+                "the audited TwinQ/min-Q FQE evaluator. Retrain FQE or use --force_retrain_fqe."
+            )
+        ckpt_squash = ckpt.get("ref_policy_squash")
+        if ckpt_squash is not None and ckpt_squash != self.ref_policy_squash:
+            raise IncompatibleFQECheckpointError(
+                f"FQE checkpoint ref_policy_squash={ckpt_squash!r} does not match the loaded IQL policy "
+                f"squash_mode={self.ref_policy_squash!r}. Retrain FQE for this policy mode."
             )
         self.q.load_state_dict(ckpt["q"])
         self.q_target.load_state_dict(ckpt.get("q_target", ckpt["q"]))

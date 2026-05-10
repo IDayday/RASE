@@ -1,49 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from pathlib import Path
 from typing import Dict, List
-
-import numpy as np
-import torch
-from tqdm import trange
 
 from rase.bc import BCAgent, BCConfig
 from rase.candidate import SweepConfig, run_candidate_sweep
 from rase.fqe import FQEAgent, FQEConfig
 from rase.iql import IQLAgent, IQLConfig
+from rase.io_utils import apply_policy_squash, ensure_fqe_checkpoint, write_csv, train_loop, resolve_policy_squash
 from rase.plotting import plot_risk_coverage, plot_sweep
 from rase.replay import load_d4rl
 from rase.utils import ensure_dir, get_device, load_yaml, save_json, set_seed
 
 
-def write_csv(rows: List[Dict[str, float]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def train_loop(agent, replay, steps: int, batch_size: int, log_every: int, name: str) -> None:
-    pbar = trange(steps, desc=name, dynamic_ncols=True)
-    last = {}
-    for step in pbar:
-        batch_np = replay.sample(batch_size)
-        batch = agent.batch_to_torch(batch_np)
-        metrics = agent.update(batch)
-        if step % log_every == 0:
-            last = metrics
-            pbar.set_postfix({k.split("/")[-1]: f"{v:.3g}" for k, v in metrics.items()})
-    if last:
-        print(f"[{name}] final metrics:", last)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="RASE Phase-0 candidate-pool sweep.")
     parser.add_argument("--config", type=str, default="configs/phase0_d4rl.yaml")
     parser.add_argument("--env_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -54,7 +26,10 @@ def main() -> None:
     parser.add_argument("--fqe_steps", type=int, default=None)
     parser.add_argument("--n_eval_states", type=int, default=None)
     parser.add_argument("--candidate_source", type=str, default=None, choices=["bc", "iql", "random", "perturb"])
+    parser.add_argument("--policy_squash", type=str, default="auto", choices=["auto", "tanh", "clip"],
+                        help="auto preserves legacy outputs/rase_phase0 checkpoints; tanh is the audited default for new runs.")
     parser.add_argument("--force_retrain", action="store_true", help="Ignore cached checkpoints and retrain all modules.")
+    parser.add_argument("--force_retrain_fqe", action="store_true", help="Retrain only FQE even if IQL/BC checkpoints are loaded.")
     args = parser.parse_args()
 
     cfg = load_yaml(args.config)
@@ -70,7 +45,10 @@ def main() -> None:
     set_seed(int(cfg["seed"]))
     device = get_device(cfg["device"])
     out_dir = ensure_dir(Path(cfg["out_dir"]) / cfg["env_name"] / f"seed{cfg['seed']}")
+    policy_squash = resolve_policy_squash(cfg, out_dir, requested=args.policy_squash, ignore_existing=bool(cfg.get("force_retrain", False)))
+    cfg = apply_policy_squash(cfg, policy_squash)
     save_json(cfg, out_dir / "resolved_config.json")
+    print(f"[policy] policy_squash={policy_squash}")
 
     print(f"Loading D4RL environment: {cfg['env_name']}")
     env, replay = load_d4rl(cfg["env_name"], normalize_obs=bool(cfg.get("normalize_obs", True)))
@@ -96,21 +74,18 @@ def main() -> None:
         train_loop(bc, replay, int(cfg["bc_steps"]), int(cfg["batch_size"]), int(cfg["log_every"]), "BC")
         bc.save(bc_ckpt)
 
-    # FQE evaluates a candidate first action followed by the IQL policy.
     fqe = FQEAgent(obs_dim, act_dim, FQEConfig(**cfg["fqe"]), ref_policy=iql.actor, device=device)
     fqe_ckpt = out_dir / "fqe_iql_ref.pt"
-    if fqe_ckpt.exists() and not cfg.get("force_retrain", False):
-        print(f"Loading FQE checkpoint: {fqe_ckpt}")
-        try:
-            fqe.load(fqe_ckpt)
-        except RuntimeError as exc:
-            print(f"[FQE] {exc}")
-            print("[FQE] Retraining FQE with the current twin-Q evaluator.")
-            train_loop(fqe, replay, int(cfg["fqe_steps"]), int(cfg["batch_size"]), int(cfg["log_every"]), "FQE")
-            fqe.save(fqe_ckpt)
-    else:
-        train_loop(fqe, replay, int(cfg["fqe_steps"]), int(cfg["batch_size"]), int(cfg["log_every"]), "FQE")
-        fqe.save(fqe_ckpt)
+    ensure_fqe_checkpoint(
+        fqe,
+        replay,
+        fqe_ckpt,
+        steps=int(cfg["fqe_steps"]),
+        batch_size=int(cfg["batch_size"]),
+        log_every=int(cfg["log_every"]),
+        force_retrain=bool(cfg.get("force_retrain", False) or args.force_retrain_fqe),
+        auto_retrain_incompatible=True,
+    )
 
     sweep_cfg = SweepConfig(
         candidate_ms=cfg["candidate_ms"],

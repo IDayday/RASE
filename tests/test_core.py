@@ -99,9 +99,18 @@ def test_metric_helpers():
     assert abs(precision_at_coverage(labels, scores, 0.5) - 1.0) < 1e-8
 
 
+def test_legacy_policy_squash_detection(tmp_path=Path('/tmp/rase_test_legacy_detection')):
+    from rase.io_utils import detect_policy_squash_from_run_dir, resolve_policy_squash
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    torch.save({"q": {}, "q_target": {}, "cfg": {}}, tmp_path / "fqe_iql_ref.pt")
+    assert detect_policy_squash_from_run_dir(tmp_path) == "clip"
+    assert resolve_policy_squash({"policy_squash": "tanh"}, tmp_path, requested="auto") == "clip"
+
+
 if __name__ == "__main__":
     test_policy_log_prob_and_sample_n()
     test_candidate_sweep_runs_without_d4rl()
     test_selection_and_proxy_alignment_run_without_d4rl()
     test_metric_helpers()
+    test_legacy_policy_squash_detection()
     print("tests_ok")
