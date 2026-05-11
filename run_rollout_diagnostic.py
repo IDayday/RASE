@@ -12,6 +12,10 @@ from rase.rollout import RolloutDiagnosticConfig, run_action_replacement_rollout
 from rase.utils import get_device, load_yaml, save_json, set_seed
 
 
+def _parse_int_list(text: str):
+    return [int(x.strip()) for x in str(text).split(",") if x.strip()]
+
+
 def load_agents(cfg, replay, device, run_dir: Path, force_retrain_fqe: bool, auto_retrain_fqe: bool):
     iql = IQLAgent(replay.obs_dim, replay.act_dim, IQLConfig(**cfg["iql"]), device)
     bc = BCAgent(replay.obs_dim, replay.act_dim, BCConfig(**cfg["bc"]), device)
@@ -39,12 +43,17 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--candidate_source", type=str, default=None, choices=["bc", "iql", "random", "perturb"])
+    parser.add_argument("--candidate_ms", type=str, default=None, help="Comma-separated candidate pool sizes, e.g. 16,64,256")
     parser.add_argument("--n_eval_states", type=int, default=None)
     parser.add_argument("--fqe_steps", type=int, default=None)
     parser.add_argument("--rollout_horizon", type=int, default=None)
     parser.add_argument("--rollout_repeats", type=int, default=None)
     parser.add_argument("--max_pairs_per_m", type=int, default=None)
     parser.add_argument("--continuation_policy", type=str, default=None, choices=["iql", "bc"])
+    parser.add_argument("--add_proxy_features", action="store_true", help="Add kNN/support/disagreement composite features to rollout pair CSVs.")
+    parser.add_argument("--knn_ref_size", type=int, default=None)
+    parser.add_argument("--knn_batch_size", type=int, default=None)
+    parser.add_argument("--save_action_dims", type=int, default=None, help="-1 saves all action dims; 0 saves none; positive saves prefix.")
     parser.add_argument("--policy_squash", type=str, default="auto", choices=["auto", "tanh", "clip"])
     parser.add_argument("--force_retrain_fqe", action="store_true", help="Retrain the audited TwinQ FQE evaluator before rollout diagnostics.")
     parser.add_argument("--no_auto_retrain_fqe", action="store_true", help="Do not auto-retrain if the cached FQE checkpoint is incompatible.")
@@ -77,6 +86,24 @@ def main() -> None:
     rollout_cfg_raw["source"] = cfg["candidate_source"]
     rollout_cfg_raw.setdefault("perturb_std", float(cfg.get("perturb_std", 0.1)))
     rollout_cfg_raw.setdefault("rase_lambda_support", float(cfg.get("rase_lambda_support", 0.05)))
+    proxy_raw = dict(cfg.get("proxy", {}) or {})
+    for proxy_key in [
+        "knn_ref_size", "knn_batch_size", "obs_scale", "action_scale",
+        "composite_lambda_support", "composite_lambda_iql_dis",
+        "composite_lambda_fqe_dis", "composite_lambda_knn",
+    ]:
+        if proxy_key in proxy_raw:
+            rollout_cfg_raw.setdefault(proxy_key, proxy_raw[proxy_key])
+    if args.candidate_ms is not None:
+        rollout_cfg_raw["candidate_ms"] = _parse_int_list(args.candidate_ms)
+    if args.add_proxy_features:
+        rollout_cfg_raw["add_proxy_features"] = True
+    if args.knn_ref_size is not None:
+        rollout_cfg_raw["knn_ref_size"] = int(args.knn_ref_size)
+    if args.knn_batch_size is not None:
+        rollout_cfg_raw["knn_batch_size"] = int(args.knn_batch_size)
+    if args.save_action_dims is not None:
+        rollout_cfg_raw["save_action_dims"] = int(args.save_action_dims)
     if args.rollout_horizon is not None:
         rollout_cfg_raw["rollout_horizon"] = args.rollout_horizon
     if args.rollout_repeats is not None:

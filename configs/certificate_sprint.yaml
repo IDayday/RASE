@@ -1,0 +1,36 @@
+# RASE action-level certificate sprint configuration.
+# This config intentionally reuses existing Phase-0 IQL/BC checkpoints under
+# outputs/rase_phase0 and does not require a clean Phase-0 rerun.
+
+base_config: configs/phase0_d4rl.yaml
+out_dir: outputs/rase_phase0
+policy_squash: auto
+
+envs:
+  - halfcheetah-medium-replay-v2
+  - hopper-medium-replay-v2
+  - walker2d-medium-replay-v2
+seeds: [41, 42, 43]
+sources: [bc, iql]
+
+rollout:
+  candidate_ms: [16, 64, 256]
+  n_eval_states: 384
+  max_pairs_per_m: 128
+  rollout_horizon: 50
+  rollout_repeats: 3
+  continuation_policy: iql
+  add_proxy_features: true
+  save_action_dims: -1
+
+crossfit:
+  envs:
+    - halfcheetah-medium-replay-v2
+    - hopper-medium-replay-v2
+    - walker2d-medium-replay-v2
+  num_folds: 3
+  fold_iql_steps: 100000
+
+analysis:
+  coverages: [0.2, 0.3, 0.5, 0.7]
+  target_fprs: [0.25, 0.30, 0.35, 0.40]

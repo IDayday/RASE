@@ -82,6 +82,7 @@ def collect_selected_candidates(
         "base_action",
         "selected_action",
         "pred_q",
+        "candidate_argmax",
         "pred_pair_gap",
         "iql_adv_vs_v",
         "iql_q_disagreement",
@@ -162,6 +163,7 @@ def collect_selected_candidates(
             out[M]["base_action"].append(base_act.cpu().numpy())
             out[M]["selected_action"].append(best_act.cpu().numpy())
             out[M]["pred_q"].append(best_q.cpu().numpy())
+            out[M]["candidate_argmax"].append(best.cpu().numpy().astype(np.float32))
             out[M]["pred_pair_gap"].append(best_pair_gap.cpu().numpy())
             out[M]["iql_adv_vs_v"].append(best_adv_vs_v.cpu().numpy())
             out[M]["iql_q_disagreement"].append(best_iql_dis.cpu().numpy())
@@ -191,7 +193,7 @@ def selected_dict_to_rows(selected: Dict[int, Dict[str, np.ndarray]], source: st
     """
     rows: list[dict] = []
     skip = {"obs", "raw_obs", "base_action", "selected_action"}
-    int_fields = {"indices", "pred_positive", "fqe_positive", "fpi_fqe"}
+    int_fields = {"indices", "candidate_argmax", "pred_positive", "fqe_positive", "fpi_fqe"}
     for M, data in selected.items():
         n = len(data["indices"])
         one_dim_fields = []

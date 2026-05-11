@@ -32,6 +32,24 @@ class RolloutDiagnosticConfig:
     continuation_policy: ContinuationPolicy = "iql"
     deterministic_continuation: bool = True
 
+    # Certificate-sprint additions.  These make the rollout CSV self-contained:
+    # the exact same state-action pairs that receive simulator labels also carry
+    # support / disagreement / kNN / composite scores.
+    add_proxy_features: bool = False
+    knn_ref_size: int = 20000
+    knn_batch_size: int = 512
+    obs_scale: float = 1.0
+    action_scale: float = 1.0
+    composite_lambda_support: float = 0.05
+    composite_lambda_iql_dis: float = 0.10
+    composite_lambda_fqe_dis: float = 0.10
+    composite_lambda_knn: float = 0.10
+
+    # -1 saves all action dimensions, 0 saves none, positive value saves prefix.
+    # Saving actions lets cross-fitted verifier scripts rescore the exact rollout
+    # pairs without having to resample candidates.
+    save_action_dims: int = -1
+
 
 def _env_step(env, action: np.ndarray):
     out = env.step(action.astype(np.float32))
@@ -154,6 +172,73 @@ def _pick_pairs(data: Dict[str, np.ndarray], max_pairs: int, only_pred_positive:
     return np.sort(candidates)
 
 
+def _add_optional_proxy_features(
+    selected: Dict[int, Dict[str, np.ndarray]],
+    replay: D4RLReplayBuffer,
+    cfg: RolloutDiagnosticConfig,
+    device: torch.device,
+    seed: int,
+) -> Dict[int, Dict[str, np.ndarray]]:
+    if not bool(cfg.add_proxy_features):
+        return selected
+    from .proxy import ProxyConfig, add_knn_proxy_to_selected
+
+    proxy_cfg = ProxyConfig(
+        knn_ref_size=int(cfg.knn_ref_size),
+        knn_batch_size=int(cfg.knn_batch_size),
+        obs_scale=float(cfg.obs_scale),
+        action_scale=float(cfg.action_scale),
+        composite_lambda_support=float(cfg.composite_lambda_support),
+        composite_lambda_iql_dis=float(cfg.composite_lambda_iql_dis),
+        composite_lambda_fqe_dis=float(cfg.composite_lambda_fqe_dis),
+        composite_lambda_knn=float(cfg.composite_lambda_knn),
+    )
+    return add_knn_proxy_to_selected(selected, replay, proxy_cfg, device, seed=seed)
+
+
+def _float_or_int(v):
+    if isinstance(v, (np.integer, int)):
+        return int(v)
+    if isinstance(v, (np.floating, float)):
+        return float(v)
+    return v
+
+
+def _scalar_data_row(data: Dict[str, np.ndarray], j: int) -> dict:
+    skip = {"obs", "raw_obs", "base_action", "selected_action"}
+    row = {}
+    for key, arr in data.items():
+        if key in skip:
+            continue
+        arr = np.asarray(arr)
+        if arr.ndim == 1 and j < arr.shape[0]:
+            out_key = "index" if key == "indices" else key
+            row[out_key] = _float_or_int(arr[j])
+    return row
+
+
+def _add_action_columns(row: dict, data: Dict[str, np.ndarray], j: int, save_action_dims: int) -> dict:
+    if int(save_action_dims) == 0:
+        return row
+    selected = np.asarray(data["selected_action"][j]).reshape(-1)
+    base = np.asarray(data["base_action"][j]).reshape(-1)
+    n = len(selected) if int(save_action_dims) < 0 else min(int(save_action_dims), len(selected))
+    row["action_dim"] = int(len(selected))
+    for d in range(n):
+        row[f"selected_action_{d}"] = float(selected[d])
+        row[f"base_action_{d}"] = float(base[d])
+    return row
+
+
+def _mean_key(data: Dict[str, np.ndarray], chosen: np.ndarray, key: str) -> float:
+    if key not in data or chosen.size == 0:
+        return float("nan")
+    x = np.asarray(data[key])[chosen]
+    if x.size == 0:
+        return float("nan")
+    return float(np.mean(x))
+
+
 def run_action_replacement_rollout_diagnostic(
     env,
     replay: D4RLReplayBuffer,
@@ -164,11 +249,16 @@ def run_action_replacement_rollout_diagnostic(
     device: torch.device,
     seed: int = 0,
 ) -> dict[str, list[dict]]:
-    """Validate FQE pairwise labels with short simulator rollouts.
+    """Validate candidate-level labels with short simulator rollouts.
 
-    For each selected candidate action a*, compare a short-horizon rollout from
+    For every selected candidate action a*, compare a short-horizon rollout from
     the same approximate MuJoCo state after taking either the dataset action a0 or
     a*. Both branches then follow the same continuation policy.
+
+    In certificate-sprint mode, this function also stores proxy/certificate
+    features on the same state-action pairs that receive rollout labels. This is
+    the key difference from the older Phase-1 proxy diagnostic, which evaluated
+    proxy alignment on a different sample of states.
     """
     sel_cfg = CandidateSelectionConfig(
         candidate_ms=cfg.candidate_ms,
@@ -179,6 +269,7 @@ def run_action_replacement_rollout_diagnostic(
         rase_lambda_support=cfg.rase_lambda_support,
     )
     selected = collect_selected_candidates(replay, iql, bc, fqe, sel_cfg, device, include_raw_obs=True)
+    selected = _add_optional_proxy_features(selected, replay, cfg, device, seed=seed)
     cont = iql.actor if cfg.continuation_policy == "iql" else bc.policy
 
     pair_rows: list[dict] = []
@@ -222,25 +313,25 @@ def run_action_replacement_rollout_diagnostic(
             rollout_adv.append(ra)
             fqe_adv.append(fa)
             pred_adv.append(pa)
-            pair_rows.append({
+
+            row = _scalar_data_row(data, int(j))
+            row.update({
                 "M": int(M),
                 "source": cfg.source,
-                "index": int(data["indices"][j]),
-                "pred_pair_gap": pa,
-                "fqe_pair_gap": fa,
+                "continuation_policy": cfg.continuation_policy,
                 "rollout_adv": ra,
                 "rollout_base_return": base_mean,
                 "rollout_candidate_return": cand_mean,
-                "support_nll": float(data["support_nll"][j]),
-                "rase_score": float(data["rase_score"][j]),
-                "iql_q_disagreement": float(data["iql_q_disagreement"][j]),
-                "fqe_disagreement": float(data["fqe_disagreement"][j]),
                 "pred_positive": int(pa > 0.0),
                 "fqe_positive": int(fa > 0.0),
                 "rollout_positive": int(ra > 0.0),
                 "fpi_rollout": int((pa > 0.0) and (ra <= 0.0)),
                 "fpi_fqe": int((pa > 0.0) and (fa <= 0.0)),
+                "rollout_horizon": int(cfg.rollout_horizon),
+                "rollout_repeats": int(cfg.rollout_repeats),
             })
+            row = _add_action_columns(row, data, int(j), int(cfg.save_action_dims))
+            pair_rows.append(row)
 
         rollout_adv_np = np.asarray(rollout_adv)
         fqe_adv_np = np.asarray(fqe_adv)
@@ -250,6 +341,7 @@ def run_action_replacement_rollout_diagnostic(
         summary_rows.append({
             "M": int(M),
             "source": cfg.source,
+            "continuation_policy": cfg.continuation_policy,
             "n_pairs": int(len(rollout_adv_np)),
             "rollout_adv_mean": float(rollout_adv_np.mean()),
             "rollout_adv_std": float(rollout_adv_np.std(ddof=1)) if len(rollout_adv_np) > 1 else 0.0,
@@ -257,10 +349,18 @@ def run_action_replacement_rollout_diagnostic(
             "pred_adv_mean": float(pred_adv_np.mean()),
             "pred_rollout_gap_mean": float((pred_adv_np - rollout_adv_np).mean()),
             "fqe_rollout_gap_mean": float((fqe_adv_np - rollout_adv_np).mean()),
-            "rollout_fpi_rate": float(rollout_fpi.sum() / max(int(pred_pos.sum()), 1)),
+            "rollout_fpi_rate": float(rollout_fpi.mean()),
             "rollout_positive_rate": float((rollout_adv_np > 0.0).mean()),
+            "fqe_positive_rate": float((fqe_adv_np > 0.0).mean()),
+            "pred_positive_rate": float((pred_adv_np > 0.0).mean()),
             "fqe_rollout_corr": safe_corr(fqe_adv_np, rollout_adv_np),
             "pred_rollout_corr": safe_corr(pred_adv_np, rollout_adv_np),
+            "support_nll_mean": _mean_key(data, chosen, "support_nll"),
+            "knn_sa_distance_mean": _mean_key(data, chosen, "knn_sa_distance"),
+            "rase_score_mean": _mean_key(data, chosen, "rase_score"),
+            "rase_score_v2_mean": _mean_key(data, chosen, "rase_score_v2"),
+            "iql_q_disagreement_mean": _mean_key(data, chosen, "iql_q_disagreement"),
+            "fqe_disagreement_mean": _mean_key(data, chosen, "fqe_disagreement"),
         })
 
     return {"pairs": pair_rows, "summary": summary_rows}
